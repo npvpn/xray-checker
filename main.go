@@ -9,6 +9,7 @@ import (
 	"xray-checker/logger"
 	"xray-checker/metrics"
 	"xray-checker/models"
+	"xray-checker/reporter"
 	"xray-checker/subscription"
 	"xray-checker/web"
 	"xray-checker/xray"
@@ -101,6 +102,12 @@ func main() {
 	runCheckIteration := func() {
 		logger.Info("Starting proxy check iteration")
 		proxyChecker.CheckAllProxies()
+
+		if config.CLIConfig.Report.URL != "" {
+			if err := reporter.SendReport(proxyChecker, version); err != nil {
+				logger.Error("Report failed: %v", err)
+			}
+		}
 
 		if config.CLIConfig.Metrics.PushURL != "" {
 			pushConfig, err := metrics.ParseURL(config.CLIConfig.Metrics.PushURL)

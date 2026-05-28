@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/alecthomas/kong"
 )
@@ -63,6 +64,16 @@ type CLI struct {
 		CustomAssetsPath  string `name:"web-custom-assets-path" help:"Path to custom assets directory (logo.svg, favicon.ico, custom.css, index.html)" default:"" env:"WEB_CUSTOM_ASSETS_PATH"`
 	} `embed:"" prefix:""`
 
+	Report struct {
+		URL      string `name:"report-url" help:"URL to POST probe check results (telegram_bot API)" default:"" env:"REPORT_URL"`
+		Token    string `name:"report-token" help:"Bearer token for report API" default:"" env:"REPORT_TOKEN"`
+		Slug     string `name:"probe-slug" help:"Unique probe identifier" default:"" env:"PROBE_SLUG"`
+		Name     string `name:"probe-name" help:"Human-readable probe name" default:"" env:"PROBE_NAME"`
+		Region   string `name:"probe-region" help:"Probe region label" default:"" env:"PROBE_REGION"`
+		City     string `name:"probe-city" help:"Probe city label" default:"" env:"PROBE_CITY"`
+		Operator string `name:"probe-operator" help:"Probe ISP/operator label" default:"" env:"PROBE_OPERATOR"`
+	} `embed:"" prefix:""`
+
 	Version  VersionFlag `name:"version" help:"Print version information and quit"`
 	RunOnce  bool        `name:"run-once" help:"Run one check cycle and exit" default:"false" env:"RUN_ONCE"`
 	LogLevel string      `name:"log-level" help:"Log level (debug|info|warn|error|none)" default:"info" env:"LOG_LEVEL"`
@@ -71,6 +82,17 @@ type CLI struct {
 func (c *CLI) Validate() error {
 	if c.Web.Public && !c.Metrics.Protected {
 		return fmt.Errorf("--web-public requires --metrics-protected to be enabled")
+	}
+	if strings.TrimSpace(c.Report.URL) != "" {
+		if strings.TrimSpace(c.Report.Slug) == "" {
+			return fmt.Errorf("PROBE_SLUG is required when REPORT_URL is set")
+		}
+		if strings.TrimSpace(c.Report.Region) == "" {
+			return fmt.Errorf("PROBE_REGION is required when REPORT_URL is set")
+		}
+		if strings.TrimSpace(c.Report.Token) == "" {
+			return fmt.Errorf("REPORT_TOKEN is required when REPORT_URL is set")
+		}
 	}
 	return nil
 }

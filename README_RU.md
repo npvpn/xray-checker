@@ -46,9 +46,28 @@ Xray Checker - это инструмент для мониторинга дос�
 
 ```bash
 docker run -d \
+  --name xray-probe \
+  --restart unless-stopped \
+  -e SUBSCRIPTION_URL=https://your-subscription-url/sub \
+  -e PROXY_CHECK_INTERVAL=300 \
+  -e PROXY_CHECK_METHOD=download \
+  -e REPORT_URL=https://your-domain/vpn_bot/xray-probe/report \
+  -e REPORT_TOKEN=your-secret-token \
+  -e PROBE_SLUG=msk-beeline-ivan \
+  -e PROBE_NAME="Иван, Москва" \
+  -e PROBE_REGION=Москва \
+  -e PROBE_OPERATOR=Beeline \
+  -p 2112:2112 \
+  youruser/xray-checker:latest
+```
+
+Базовый запуск без отправки отчётов:
+
+```bash
+docker run -d \
   -e SUBSCRIPTION_URL=https://your-subscription-url/sub \
   -p 2112:2112 \
-  kutovoys/xray-checker
+  youruser/xray-checker:latest
 ```
 
 ### Docker Compose
@@ -56,9 +75,18 @@ docker run -d \
 ```yaml
 services:
   xray-checker:
-    image: kutovoys/xray-checker
+    image: youruser/xray-checker:latest
+    restart: unless-stopped
     environment:
       - SUBSCRIPTION_URL=https://your-subscription-url/sub
+      - PROXY_CHECK_INTERVAL=300
+      - PROXY_CHECK_METHOD=download
+      - REPORT_URL=https://your-domain/vpn_bot/xray-probe/report
+      - REPORT_TOKEN=your-secret-token
+      - PROBE_SLUG=msk-beeline-ivan
+      - PROBE_NAME=Иван, Москва
+      - PROBE_REGION=Москва
+      - PROBE_OPERATOR=Beeline
     ports:
       - "2112:2112"
 ```
