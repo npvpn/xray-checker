@@ -1,12 +1,15 @@
 package xray
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"xray-checker/logger"
 	"xray-checker/models"
+
+	"github.com/xtls/xray-core/infra/conf/serial"
 )
 
 type ConfigGenerator struct{}
@@ -28,37 +31,94 @@ func (g *ConfigGenerator) GenerateConfig(proxies []*models.ProxyConfig, startPor
 	return json.MarshalIndent(config, "", "  ")
 }
 
-func (g *ConfigGenerator) GenerateAndSaveConfig(proxies []*models.ProxyConfig, startPort int, filename string, xrayLogLevel string) error {
-	configBytes, err := g.GenerateConfig(proxies, startPort, xrayLogLevel)
+// validateConfigBuild runs the generated JSON through xray-core's decode+build path
+// (the same path the runner uses at startup), so a config that xray-core would reject
+// is caught here — letting us report and prune the offending node instead of having
+// the whole instance abort on Start.
+func validateConfigBuild(configBytes []byte) error {
+	xrayConfig, err := serial.DecodeJSONConfig(bytes.NewReader(configBytes))
 	if err != nil {
-		return fmt.Errorf("error generating config: %v", err)
+		return err
 	}
-
-	if err := g.ValidateConfig(configBytes); err != nil {
-		logger.Warn("Config validation failed: %v", err)
-	}
-
-	if err := os.WriteFile(filename, configBytes, 0644); err != nil {
-		return fmt.Errorf("error saving config: %v", err)
-	}
-
-	return nil
+	_, err = xrayConfig.Build()
+	return err
 }
 
-func (g *ConfigGenerator) ValidateConfig(configBytes []byte) error {
-	var config map[string]interface{}
-	if err := json.Unmarshal(configBytes, &config); err != nil {
-		return fmt.Errorf("failed to parse config: %v", err)
-	}
+func outboundTag(proxy *models.ProxyConfig) string {
+	return fmt.Sprintf("%s_%d", proxy.Name, proxy.Index)
+}
 
-	required := []string{"inbounds", "outbounds", "routing"}
-	for _, field := range required {
-		if _, ok := config[field]; !ok {
-			return fmt.Errorf("missing required field: %s", field)
+// extractFailingOutboundTag pulls the outbound tag from an xray build error shaped
+// like: "... failed to build outbound config with tag <TAG> > <reason>".
+func extractFailingOutboundTag(errMsg string) string {
+	const marker = "with tag "
+	i := strings.Index(errMsg, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := errMsg[i+len(marker):]
+	if j := strings.Index(rest, " > "); j >= 0 {
+		return strings.TrimSpace(rest[:j])
+	}
+	return strings.TrimSpace(rest)
+}
+
+// shortBuildReason returns the leaf segment of xray's ">"-chained error message.
+func shortBuildReason(err error) string {
+	parts := strings.Split(err.Error(), " > ")
+	return strings.TrimSpace(parts[len(parts)-1])
+}
+
+// GenerateValidatedConfig generates the xray config and, if xray-core rejects a
+// specific outbound at build time, drops that proxy, logs why it was excluded, and
+// regenerates. This prevents a single unsupported/legacy node (e.g. a transport
+// field removed in a newer xray-core) from bringing down the whole instance. It
+// writes the final, buildable config to filename and returns the surviving proxies.
+func (g *ConfigGenerator) GenerateValidatedConfig(proxies []*models.ProxyConfig, startPort int, filename, xrayLogLevel string) ([]*models.ProxyConfig, error) {
+	current := proxies
+	for {
+		configBytes, err := g.GenerateConfig(current, startPort, xrayLogLevel)
+		if err != nil {
+			return current, fmt.Errorf("error generating config: %v", err)
 		}
-	}
 
-	return nil
+		buildErr := validateConfigBuild(configBytes)
+		if buildErr == nil {
+			if err := os.WriteFile(filename, configBytes, 0644); err != nil {
+				return current, fmt.Errorf("error saving config: %v", err)
+			}
+			if len(current) != len(proxies) {
+				logger.Warn("Config validated after excluding %d unbuildable prox(ies); %d remain", len(proxies)-len(current), len(current))
+			}
+			return current, nil
+		}
+
+		tag := extractFailingOutboundTag(buildErr.Error())
+		idx := -1
+		if tag != "" {
+			for i, p := range current {
+				if outboundTag(p) == tag {
+					idx = i
+					break
+				}
+			}
+		}
+
+		if idx < 0 {
+			// Failure can't be attributed to a single proxy — keep the config so the
+			// error surfaces at startup instead of silently dropping everything.
+			logger.Error("Xray config build failed and no offending proxy could be identified; keeping config as-is: %v", buildErr)
+			if werr := os.WriteFile(filename, configBytes, 0644); werr != nil {
+				return current, werr
+			}
+			return current, nil
+		}
+
+		bad := current[idx]
+		logger.Warn("Excluding proxy %q (%s %s:%d): xray rejected its config: %s",
+			bad.Name, bad.Protocol, bad.Server, bad.Port, shortBuildReason(buildErr))
+		current = append(current[:idx:idx], current[idx+1:]...)
+	}
 }
 
 func (g *ConfigGenerator) generateInbounds(proxies []*models.ProxyConfig, startPort int) []map[string]interface{} {
@@ -108,6 +168,13 @@ func (g *ConfigGenerator) generateOutbounds(proxies []*models.ProxyConfig) []map
 	}
 
 	return outbounds
+}
+
+// GenerateProxyOutbound returns the xray outbound configuration map for a single
+// proxy. It is exported so the web layer can surface a sanitized view of the
+// generated config for debugging without rebuilding the whole config.
+func (g *ConfigGenerator) GenerateProxyOutbound(proxy *models.ProxyConfig) map[string]interface{} {
+	return g.generateProxyOutbound(proxy)
 }
 
 func (g *ConfigGenerator) generateProxyOutbound(proxy *models.ProxyConfig) map[string]interface{} {
@@ -178,9 +245,63 @@ func (g *ConfigGenerator) generateProxyOutbound(proxy *models.ProxyConfig) map[s
 				},
 			},
 		}
+
+	case "hysteria":
+		// xray-core's outbound HysteriaClientConfig has only version/address/port.
+		// The auth lives in streamSettings.hysteriaSettings.auth (set below).
+		outbound["settings"] = map[string]interface{}{
+			"address": proxy.Server,
+			"port":    proxy.Port,
+			"version": 2,
+		}
+
+	case "socks", "http":
+		// Plain forward proxies. For an https:// proxy the protocol is "http"
+		// with TLS applied via streamSettings (proxy.Security == "tls").
+		server := map[string]interface{}{
+			"address": proxy.Server,
+			"port":    proxy.Port,
+		}
+		if proxy.Username != "" || proxy.Password != "" {
+			server["users"] = []map[string]interface{}{
+				{"user": proxy.Username, "pass": proxy.Password},
+			}
+		}
+		outbound["settings"] = map[string]interface{}{
+			"servers": []map[string]interface{}{server},
+		}
+
+	case "wireguard":
+		peer := map[string]interface{}{
+			"publicKey": proxy.WGPeerPublicKey,
+			"endpoint":  fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
+		}
+		if len(proxy.WGAllowedIPs) > 0 {
+			peer["allowedIPs"] = proxy.WGAllowedIPs
+		} else {
+			peer["allowedIPs"] = []string{"0.0.0.0/0", "::/0"}
+		}
+		if proxy.WGPreSharedKey != "" {
+			peer["preSharedKey"] = proxy.WGPreSharedKey
+		}
+		if proxy.WGKeepalive > 0 {
+			peer["keepAlive"] = proxy.WGKeepalive
+		}
+		settings := map[string]interface{}{
+			"secretKey": proxy.WGPrivateKey,
+			"address":   proxy.WGAddresses,
+			"peers":     []map[string]interface{}{peer},
+		}
+		if proxy.WGMTU > 0 {
+			settings["mtu"] = proxy.WGMTU
+		}
+		outbound["settings"] = settings
 	}
 
-	outbound["streamSettings"] = g.generateStreamSettings(proxy)
+	// WireGuard is its own transport and takes no streamSettings.
+	if proxy.Protocol != "wireguard" {
+		outbound["streamSettings"] = g.generateStreamSettings(proxy)
+	}
 
 	return outbound
 }
@@ -188,30 +309,53 @@ func (g *ConfigGenerator) generateProxyOutbound(proxy *models.ProxyConfig) map[s
 func (g *ConfigGenerator) generateStreamSettings(proxy *models.ProxyConfig) map[string]interface{} {
 	network := proxy.Type
 	if network == "" {
-		network = "tcp"
+		if proxy.Protocol == "hysteria" {
+			network = "hysteria"
+		} else {
+			network = "tcp"
+		}
 	}
 
 	security := proxy.Security
 	if security == "" {
-		security = "none"
+		if proxy.Protocol == "hysteria" {
+			security = "tls"
+		} else {
+			security = "none"
+		}
 	}
 
 	ss := map[string]interface{}{
 		"network":  network,
 		"security": security,
-		"sockopt":  map[string]interface{}{},
 	}
 
 	if security == "tls" {
 		tlsSettings := map[string]interface{}{
-			"serverName":    proxy.SNI,
-			"allowInsecure": proxy.AllowInsecure,
+			"serverName": proxy.SNI,
+		}
+		// xray-core removed "allowInsecure"; accepting a specific (e.g.
+		// self-signed) cert is now done via pinnedPeerCertSha256, and a
+		// mismatched SNI via verifyPeerCertByName.
+		if proxy.PinnedPeerCertSha256 != "" {
+			tlsSettings["pinnedPeerCertSha256"] = proxy.PinnedPeerCertSha256
+		}
+		if proxy.VerifyPeerCertByName != "" {
+			tlsSettings["verifyPeerCertByName"] = proxy.VerifyPeerCertByName
+		}
+		if proxy.AllowInsecure && proxy.PinnedPeerCertSha256 == "" && proxy.VerifyPeerCertByName == "" {
+			logger.Debug("proxy %q requested allowInsecure, which xray-core no longer supports; verifying TLS normally (use pinnedPeerCertSha256 to pin a cert)", proxy.Name)
 		}
 		if proxy.Fingerprint != "" {
 			tlsSettings["fingerprint"] = proxy.Fingerprint
 		}
 		if len(proxy.ALPN) > 0 {
 			tlsSettings["alpn"] = proxy.ALPN
+		} else if proxy.Protocol == "http" {
+			// An https:// forward proxy speaks HTTP/1.1 CONNECT; pin ALPN so the
+			// TLS handshake does not negotiate h2, which the http proxy protocol
+			// cannot parse ("http2: frame too large").
+			tlsSettings["alpn"] = []string{"http/1.1"}
 		}
 		ss["tlsSettings"] = tlsSettings
 	}
@@ -252,6 +396,19 @@ func (g *ConfigGenerator) generateStreamSettings(proxy *models.ProxyConfig) map[
 		ss["grpcSettings"] = map[string]interface{}{
 			"serviceName": proxy.GetServiceName(),
 			"multiMode":   proxy.MultiMode,
+		}
+
+	case "kcp", "mkcp":
+		if proxy.RawKcpSettings != "" {
+			var rawSettings map[string]interface{}
+			if err := json.Unmarshal([]byte(proxy.RawKcpSettings), &rawSettings); err == nil {
+				// xray-core removed kcp "header" and "seed" (migrated to finalmask).
+				// Emitting them aborts the WHOLE config build, taking every proxy
+				// down, so drop them — the node degrades to plain mKCP instead.
+				delete(rawSettings, "header")
+				delete(rawSettings, "seed")
+				ss["kcpSettings"] = rawSettings
+			}
 		}
 
 	case "http", "h2":
@@ -300,6 +457,59 @@ func (g *ConfigGenerator) generateStreamSettings(proxy *models.ProxyConfig) map[
 				xhttpSettings["mode"] = proxy.Mode
 			}
 			ss["xhttpSettings"] = xhttpSettings
+		}
+
+	case "hysteria":
+		ss["hysteriaSettings"] = map[string]interface{}{
+			"version": 2,
+			"auth":    proxy.HysteriaAuth,
+		}
+
+		// Build FinalMask with port-hopping (udpHop) and Salamander obfuscation.
+		//
+		// Congestion/bandwidth control (brutal up/down) is intentionally NOT emitted:
+		// it is irrelevant for a connectivity check, and an out-of-range value (e.g. a
+		// bare "100" parsed as 100 bytes/s, below xray-core's 65536 minimum) would make
+		// xray-core reject the *entire* config and bring every proxy down. Only obfs and
+		// port-hopping affect whether the proxy is reachable, so only those are kept.
+		var finalMask map[string]interface{}
+
+		// Port-hopping (matches libXray output: finalmask.quicParams.udpHop.ports)
+		if proxy.HysteriaPorts != "" {
+			udpHop := map[string]interface{}{
+				"ports": proxy.HysteriaPorts,
+			}
+			if proxy.HysteriaHopInterval > 0 {
+				// xray-core's UdpHop.Interval is an Int32Range, decoded from a plain
+				// integer (or a "min-max" string) — NOT an object.
+				udpHop["interval"] = proxy.HysteriaHopInterval
+			}
+			finalMask = map[string]interface{}{
+				"quicParams": map[string]interface{}{
+					"udpHop": udpHop,
+				},
+			}
+		}
+
+		// Salamander obfuscation (matches libXray output: finalmask.udp[].salamander)
+		if proxy.HysteriaObfs == "salamander" && proxy.HysteriaObfsPassword != "" {
+			if finalMask == nil {
+				finalMask = map[string]interface{}{}
+			}
+			finalMask["udp"] = []map[string]interface{}{
+				{
+					"type": "salamander",
+					"settings": map[string]interface{}{
+						"password": proxy.HysteriaObfsPassword,
+					},
+				},
+			}
+		}
+
+		// xray-core reads finalmask at the streamSettings top level (json:"finalmask"),
+		// NOT under sockopt (SocketConfig has no such field, so it would be dropped).
+		if finalMask != nil {
+			ss["finalmask"] = finalMask
 		}
 	}
 

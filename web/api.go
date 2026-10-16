@@ -10,29 +10,36 @@ import (
 	"xray-checker/checker"
 	"xray-checker/config"
 	"xray-checker/models"
+	"xray-checker/xray"
 )
 
 //go:embed openapi.yaml
 var openAPISpec []byte
 
 type ProxyInfo struct {
-	Index     int    `json:"index"`
-	StableID  string `json:"stableId"`
-	Name      string `json:"name"`
-	SubName   string `json:"subName"`
-	Server    string `json:"server"`
-	Port      int    `json:"port"`
-	Protocol  string `json:"protocol"`
-	ProxyPort int    `json:"proxyPort"`
-	Online    bool   `json:"online"`
-	LatencyMs int64  `json:"latencyMs"`
+	Index           int                    `json:"index"`
+	StableID        string                 `json:"stableId"`
+	Name            string                 `json:"name"`
+	SubName         string                 `json:"subName"`
+	GroupName       string                 `json:"groupName"`
+	Server          string                 `json:"server"`
+	Port            int                    `json:"port"`
+	Protocol        string                 `json:"protocol"`
+	ProxyPort       int                    `json:"proxyPort"`
+	Online          bool                   `json:"online"`
+	LatencyMs       int64                  `json:"latencyMs"`
+	LastCheck       int64                  `json:"lastCheck"`
+	MetricsLabels   map[string]string      `json:"metricsLabels,omitempty"`
+	GeneratedConfig map[string]interface{} `json:"generatedConfig,omitempty"`
 }
 
 type PublicProxyInfo struct {
 	StableID  string `json:"stableId"`
 	Name      string `json:"name"`
+	GroupName string `json:"groupName"`
 	Online    bool   `json:"online"`
 	LatencyMs int64  `json:"latencyMs"`
+	LastCheck int64  `json:"lastCheck"`
 }
 
 type StatusResponse struct {
@@ -87,19 +94,107 @@ func writeError(w http.ResponseWriter, message string, code int) {
 	})
 }
 
-func toProxyInfo(proxy *models.ProxyConfig, online bool, latency time.Duration, startPort int) ProxyInfo {
-	return ProxyInfo{
-		Index:     proxy.Index,
-		StableID:  proxy.StableID,
-		Name:      proxy.Name,
-		SubName:   proxy.SubName,
-		Server:    proxy.Server,
-		Port:      proxy.Port,
-		Protocol:  proxy.Protocol,
-		ProxyPort: startPort + proxy.Index,
-		Online:    online,
-		LatencyMs: latency.Milliseconds(),
+func toProxyInfo(proxy *models.ProxyConfig, online bool, latency time.Duration, lastCheck int64, startPort int, includeDetails bool) ProxyInfo {
+	info := ProxyInfo{
+		Index:         proxy.Index,
+		StableID:      proxy.StableID,
+		Name:          proxy.Name,
+		SubName:       proxy.SubName,
+		GroupName:     proxy.GroupName,
+		Server:        proxy.Server,
+		Port:          proxy.Port,
+		Protocol:      proxy.Protocol,
+		ProxyPort:     startPort + proxy.Index,
+		Online:        online,
+		LatencyMs:     latency.Milliseconds(),
+		LastCheck:     lastCheck,
+		MetricsLabels: proxy.MetricsLabels,
 	}
+	if includeDetails {
+		outbound := xray.NewConfigGenerator().GenerateProxyOutbound(proxy)
+		info.GeneratedConfig = sanitizeGeneratedConfig(outbound)
+	}
+	return info
+}
+
+// shouldShowServerDetails reports whether sensitive proxy details (server
+// address/port on the dashboard, generated config in the API) may be exposed.
+// Details are off unless WEB_SHOW_DETAILS is set, and additionally suppressed in
+// public mode unless the operator declares the dashboard is protected by an
+// external auth proxy via WEB_TRUSTED_EXTERNAL_AUTH.
+func shouldShowServerDetails() bool {
+	if !config.CLIConfig.Web.ShowServerDetails {
+		return false
+	}
+	if config.CLIConfig.Web.Public && !config.CLIConfig.Web.TrustedExternalAuth {
+		return false
+	}
+	return true
+}
+
+// sanitizeGeneratedConfig returns a copy of the generated outbound config with
+// secret values masked, safe to expose for inspection.
+func sanitizeGeneratedConfig(value interface{}) map[string]interface{} {
+	sanitized, ok := sanitizeGeneratedValue(value).(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return sanitized
+}
+
+// sanitizeGeneratedValue recursively walks a generated config value and masks
+// the middle of any secret field. Only low-entropy/credential keys are masked;
+// public material such as reality publicKey/shortId is left intact so the config
+// stays useful for debugging.
+func sanitizeGeneratedValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{}, len(typed))
+		for key, nested := range typed {
+			switch strings.ToLower(key) {
+			case "id", "password", "auth", "seed":
+				if text, ok := nested.(string); ok {
+					result[key] = maskMiddle(text)
+					continue
+				}
+			}
+			result[key] = sanitizeGeneratedValue(nested)
+		}
+		return result
+	case []interface{}:
+		result := make([]interface{}, len(typed))
+		for i, nested := range typed {
+			result[i] = sanitizeGeneratedValue(nested)
+		}
+		return result
+	case []map[string]interface{}:
+		result := make([]interface{}, len(typed))
+		for i, nested := range typed {
+			result[i] = sanitizeGeneratedValue(nested)
+		}
+		return result
+	case []string:
+		result := make([]interface{}, len(typed))
+		for i, nested := range typed {
+			result[i] = nested
+		}
+		return result
+	default:
+		return value
+	}
+}
+
+// maskMiddle hides the middle of a secret, keeping a short prefix/suffix so the
+// value stays recognizable. Short values are fully masked to avoid leaking
+// low-entropy secrets.
+func maskMiddle(value string) string {
+	if value == "" {
+		return ""
+	}
+	if len(value) <= 8 {
+		return "****"
+	}
+	return value[:4] + "..." + value[len(value)-4:]
 }
 
 // APIPublicProxiesHandler returns public info for all proxies (no auth required)
@@ -115,12 +210,14 @@ func APIPublicProxiesHandler(proxyChecker *checker.ProxyChecker) http.HandlerFun
 		result := make([]PublicProxyInfo, 0, len(proxies))
 
 		for _, proxy := range proxies {
-			status, latency, _ := proxyChecker.GetProxyStatus(proxy.Name)
+			status, latency, lastCheck, _ := proxyChecker.GetProxyResultByStableID(proxy.StableID)
 			result = append(result, PublicProxyInfo{
 				StableID:  proxy.StableID,
 				Name:      proxy.Name,
+				GroupName: proxy.GroupName,
 				Online:    status,
 				LatencyMs: latency.Milliseconds(),
+				LastCheck: lastCheck,
 			})
 		}
 
@@ -139,10 +236,11 @@ func APIProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http.H
 	return func(w http.ResponseWriter, r *http.Request) {
 		proxies := proxyChecker.GetProxies()
 		result := make([]ProxyInfo, 0, len(proxies))
+		includeDetails := shouldShowServerDetails()
 
 		for _, proxy := range proxies {
-			status, latency, _ := proxyChecker.GetProxyStatus(proxy.Name)
-			result = append(result, toProxyInfo(proxy, status, latency, startPort))
+			status, latency, lastCheck, _ := proxyChecker.GetProxyResultByStableID(proxy.StableID)
+			result = append(result, toProxyInfo(proxy, status, latency, lastCheck, startPort, includeDetails))
 		}
 
 		writeJSON(w, result)
@@ -179,8 +277,8 @@ func APIProxyHandler(proxyChecker *checker.ProxyChecker, startPort int) http.Han
 			return
 		}
 
-		status, latency, _ := proxyChecker.GetProxyStatus(proxy.Name)
-		writeJSON(w, toProxyInfo(proxy, status, latency, startPort))
+		status, latency, lastCheck, _ := proxyChecker.GetProxyResultByStableID(proxy.StableID)
+		writeJSON(w, toProxyInfo(proxy, status, latency, lastCheck, startPort, shouldShowServerDetails()))
 	}
 }
 
@@ -200,7 +298,7 @@ func APIStatusHandler(proxyChecker *checker.ProxyChecker) http.HandlerFunc {
 		var latencyCount int
 
 		for _, proxy := range proxies {
-			status, latency, _ := proxyChecker.GetProxyStatus(proxy.Name)
+			status, latency, _, _ := proxyChecker.GetProxyResultByStableID(proxy.StableID)
 			if status {
 				online++
 				if latency > 0 {

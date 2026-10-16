@@ -81,12 +81,6 @@ func main() {
 		}
 	}()
 
-	metrics.InitMetrics(config.CLIConfig.Metrics.Instance)
-
-	registry := prometheus.NewRegistry()
-	registry.MustRegister(metrics.GetProxyStatusMetric())
-	registry.MustRegister(metrics.GetProxyLatencyMetric())
-
 	proxyChecker := checker.NewProxyChecker(
 		*proxyConfigs,
 		config.CLIConfig.Xray.StartPort,
@@ -97,11 +91,34 @@ func main() {
 		config.CLIConfig.Proxy.DownloadTimeout,
 		config.CLIConfig.Proxy.DownloadMinSize,
 		config.CLIConfig.Proxy.CheckMethod,
+		config.CLIConfig.Proxy.CheckConcurrency,
 	)
+
+	// The collector renders metrics from the checker's current proxy snapshot on
+	// each scrape, so custom metricsLabels (#124) can change across subscription
+	// updates without resetting other series.
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(metrics.NewCollector(config.CLIConfig.Metrics.Instance, proxyChecker))
 
 	runCheckIteration := func() {
 		logger.Info("Starting proxy check iteration")
+		start := time.Now()
 		proxyChecker.CheckAllProxies()
+		elapsed := time.Since(start)
+
+		// Warn if a cycle overruns the interval: with PROXY_CHECK_CONCURRENCY set,
+		// a large/slow proxy set can take longer than PROXY_CHECK_INTERVAL, so checks
+		// (and metrics) effectively run less often than configured.
+		if interval := config.CLIConfig.Proxy.CheckInterval; interval > 0 && elapsed > time.Duration(interval)*time.Second {
+			// When a concurrency cap is set, raising it (or the interval) helps. When
+			// unlimited (0), the cycle is already as parallel as it gets, so the only
+			// useful lever is a longer interval.
+			if config.CLIConfig.Proxy.CheckConcurrency > 0 {
+				logger.Warn("Check cycle took %s, longer than PROXY_CHECK_INTERVAL=%ds — raise PROXY_CHECK_CONCURRENCY or PROXY_CHECK_INTERVAL", elapsed.Round(time.Second), interval)
+			} else {
+				logger.Warn("Check cycle took %s, longer than PROXY_CHECK_INTERVAL=%ds — raise PROXY_CHECK_INTERVAL", elapsed.Round(time.Second), interval)
+			}
+		}
 
 		if config.CLIConfig.Report.URL != "" {
 			if err := reporter.SendReport(proxyChecker, version); err != nil {
@@ -131,7 +148,12 @@ func main() {
 	}
 
 	checkScheduler := gocron.NewScheduler(time.UTC)
-	checkScheduler.Every(config.CLIConfig.Proxy.CheckInterval).Seconds().Do(func() {
+	// SingletonMode: if a check cycle overruns the interval, the next tick is skipped
+	// instead of starting a second concurrent cycle. Without a concurrency limit a
+	// cycle is bounded by PROXY_TIMEOUT so this rarely triggers, but with
+	// PROXY_CHECK_CONCURRENCY a slow cycle degrades to "runs less often" rather than
+	// piling up overlapping runs.
+	checkScheduler.Every(config.CLIConfig.Proxy.CheckInterval).Seconds().SingletonMode().Do(func() {
 		runCheckIteration()
 	})
 	checkScheduler.StartAsync()
@@ -158,6 +180,12 @@ func main() {
 			if !xray.IsConfigsEqual(*proxyConfigs, newConfigs) {
 				if err := updateConfiguration(newConfigs, proxyConfigs, xrayRunner, proxyChecker); err != nil {
 					logger.Error("Error updating configuration: %v", err)
+				} else {
+					// Immediately re-check the new proxy set so /metrics is repopulated
+					// right away instead of staying empty until the next scheduled check
+					// (up to PROXY_CHECK_INTERVAL), then drop series for removed proxies.
+					runCheckIteration()
+					proxyChecker.PruneStaleResults()
 				}
 			} else {
 				logger.Info("Subscriptions checked, no changes")
@@ -230,14 +258,16 @@ func updateConfiguration(newConfigs []*models.ProxyConfig, currentConfigs *[]*mo
 
 	configFile := "xray_config.json"
 	configGenerator := xray.NewConfigGenerator()
-	if err := configGenerator.GenerateAndSaveConfig(
+	validProxies, err := configGenerator.GenerateValidatedConfig(
 		newConfigs,
 		config.CLIConfig.Xray.StartPort,
 		configFile,
 		config.CLIConfig.Xray.LogLevel,
-	); err != nil {
+	)
+	if err != nil {
 		return err
 	}
+	newConfigs = validProxies
 
 	if err := xrayRunner.Stop(); err != nil {
 		return err

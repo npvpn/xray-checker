@@ -27,19 +27,23 @@ type CLI struct {
 		URLs           []string `name:"subscription-url" help:"URL(s) of the subscription (can be specified multiple times)" required:"true" env:"SUBSCRIPTION_URL"`
 		Update         bool     `name:"subscription-update" help:"Whether to recheck the subscription" default:"true" env:"SUBSCRIPTION_UPDATE"`
 		UpdateInterval int      `name:"subscription-update-interval" help:"Interval for subscription updates in seconds" default:"300" env:"SUBSCRIPTION_UPDATE_INTERVAL"`
+		JSONFormat     bool     `name:"subscription-json-format" help:"Request full JSON configs from the panel (sends app-like headers so grouped/balancer nodes are returned individually instead of collapsed share links)" default:"false" env:"SUBSCRIPTION_JSON_FORMAT"`
+		UserAgent      string   `name:"subscription-user-agent" help:"Custom User-Agent for subscription requests (overrides the default and the --subscription-json-format preset)" default:"" env:"SUBSCRIPTION_USER_AGENT"`
+		Headers        []string `name:"subscription-header" help:"Extra HTTP header for subscription requests in 'Key: Value' form (repeatable; env: comma-separated)" env:"SUBSCRIPTION_HEADERS"`
 	} `embed:"" prefix:""`
 
 	Proxy struct {
-		CheckInterval   int    `name:"proxy-check-interval" help:"Interval for proxy checks in seconds" default:"300" env:"PROXY_CHECK_INTERVAL"`
-		CheckMethod     string `name:"proxy-check-method" help:"Method for checking proxy, ip, status or download" default:"ip" env:"PROXY_CHECK_METHOD"`
-		IpCheckUrl      string `name:"proxy-ip-check-url" help:"Service URL for IP checking" default:"https://api.ipify.org?format=text" env:"PROXY_IP_CHECK_URL"`
-		StatusCheckUrl  string `name:"proxy-status-check-url" help:"Response status generator, used by check-method=status" default:"http://cp.cloudflare.com/generate_204" env:"PROXY_STATUS_CHECK_URL"`
-		DownloadUrl     string `name:"proxy-download-url" help:"URL for file download checking, used by check-method=download" default:"https://proof.ovh.net/files/1Mb.dat" env:"PROXY_DOWNLOAD_URL"`
-		DownloadTimeout int    `name:"proxy-download-timeout" help:"Timeout for download checking in seconds" default:"60" env:"PROXY_DOWNLOAD_TIMEOUT"`
-		DownloadMinSize int64  `name:"proxy-download-min-size" help:"Minimum bytes to download for successful check" default:"51200" env:"PROXY_DOWNLOAD_MIN_SIZE"`
-		Timeout         int    `name:"proxy-timeout" help:"Timeout for IP checking in seconds" default:"30" env:"PROXY_TIMEOUT"`
-		SimulateLatency bool   `name:"simulate-latency" help:"Whether to add latency to the response" default:"true" env:"SIMULATE_LATENCY"`
-		ResolveDomains  bool   `name:"proxy-resolve-domains" help:"Resolve proxy server domains into IPs and expand configs" env:"PROXY_RESOLVE_DOMAINS"`
+		CheckInterval    int    `name:"proxy-check-interval" help:"Interval for proxy checks in seconds" default:"300" env:"PROXY_CHECK_INTERVAL"`
+		CheckConcurrency int    `name:"proxy-check-concurrency" help:"Max proxies checked in parallel per cycle (0 = unlimited)" default:"0" env:"PROXY_CHECK_CONCURRENCY"`
+		CheckMethod      string `name:"proxy-check-method" help:"Method for checking proxy, ip, status or download" default:"ip" env:"PROXY_CHECK_METHOD"`
+		IpCheckUrl       string `name:"proxy-ip-check-url" help:"Service URL for IP checking" default:"https://api.ipify.org?format=text" env:"PROXY_IP_CHECK_URL"`
+		StatusCheckUrl   string `name:"proxy-status-check-url" help:"Response status generator, used by check-method=status" default:"http://cp.cloudflare.com/generate_204" env:"PROXY_STATUS_CHECK_URL"`
+		DownloadUrl      string `name:"proxy-download-url" help:"URL for file download checking, used by check-method=download" default:"https://proof.ovh.net/files/1Mb.dat" env:"PROXY_DOWNLOAD_URL"`
+		DownloadTimeout  int    `name:"proxy-download-timeout" help:"Timeout for download checking in seconds" default:"60" env:"PROXY_DOWNLOAD_TIMEOUT"`
+		DownloadMinSize  int64  `name:"proxy-download-min-size" help:"Minimum bytes to download for successful check" default:"51200" env:"PROXY_DOWNLOAD_MIN_SIZE"`
+		Timeout          int    `name:"proxy-timeout" help:"Timeout for IP checking in seconds" default:"30" env:"PROXY_TIMEOUT"`
+		SimulateLatency  bool   `name:"simulate-latency" help:"Whether to add latency to the response" default:"true" env:"SIMULATE_LATENCY"`
+		ResolveDomains   bool   `name:"proxy-resolve-domains" help:"Resolve proxy server domains into IPs and expand configs" env:"PROXY_RESOLVE_DOMAINS"`
 	} `embed:"" prefix:""`
 
 	Xray struct {
@@ -59,9 +63,11 @@ type CLI struct {
 	} `embed:"" prefix:""`
 
 	Web struct {
-		ShowServerDetails bool   `name:"web-show-details" help:"Show server IP addresses and ports in web UI" default:"false" env:"WEB_SHOW_DETAILS"`
-		Public            bool   `name:"web-public" help:"Make dashboard public (requires --metrics-protected)" default:"false" env:"WEB_PUBLIC"`
-		CustomAssetsPath  string `name:"web-custom-assets-path" help:"Path to custom assets directory (logo.svg, favicon.ico, custom.css, index.html)" default:"" env:"WEB_CUSTOM_ASSETS_PATH"`
+		ShowServerDetails   bool   `name:"web-show-details" help:"Show server IP addresses and ports in web UI" default:"false" env:"WEB_SHOW_DETAILS"`
+		Public              bool   `name:"web-public" help:"Make dashboard public (requires --metrics-protected)" default:"false" env:"WEB_PUBLIC"`
+		TrustedExternalAuth bool   `name:"web-trusted-external-auth" help:"Allow server details in public mode when an external auth proxy protects the dashboard" default:"false" env:"WEB_TRUSTED_EXTERNAL_AUTH"`
+		PublicShowProtocol  bool   `name:"web-public-show-protocol" help:"Show protocol badge on cards in public mode (always shown when not public)" default:"false" env:"WEB_PUBLIC_SHOW_PROTOCOL"`
+		CustomAssetsPath    string `name:"web-custom-assets-path" help:"Path to custom assets directory (logo.svg, favicon.ico, custom.css, index.html)" default:"" env:"WEB_CUSTOM_ASSETS_PATH"`
 	} `embed:"" prefix:""`
 
 	Report struct {

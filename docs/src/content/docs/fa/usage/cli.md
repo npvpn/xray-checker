@@ -57,7 +57,11 @@ chmod +x xray-checker
   --subscription-url=https://your-subscription-url/sub \
   --subscription-update=true \
   --subscription-update-interval=300 \
+  --subscription-json-format=false \
+  --subscription-user-agent="" \
+  --subscription-header="X-Token: abc" \
   --proxy-check-interval=300 \
+  --proxy-check-concurrency=0 \
   --proxy-timeout=30 \
   --proxy-check-method=ip \
   --proxy-ip-check-url="https://api.ipify.org?format=text" \
@@ -79,6 +83,9 @@ chmod +x xray-checker
   --metrics-base-path="/xray/monitor" \
   --web-show-details=false \
   --web-public=false \
+  --web-trusted-external-auth=false \
+  --web-public-show-protocol=false \
+  --web-custom-assets-path="" \
   --log-level=info \
   --run-once=false
 ```

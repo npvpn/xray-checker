@@ -1,11 +1,10 @@
 {{ define "index.html" }}
 <!DOCTYPE html>
-<html lang="en" x-data="dashboard()" :class="{ 'light': !darkMode }" x-cloak>
+<html lang="en" x-data="dashboard()" :class="{ 'light': !darkMode, 'no-bg': hideBackground }" x-cloak>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex, nofollow" />
-    <meta name="color-scheme" content="dark only" />
     <title>
       {{ if and .IsPublic .SubscriptionName }}{{ .SubscriptionName }}{{ else
       }}Xray Checker{{ end }}
@@ -90,6 +89,17 @@
         --btn-active-border: rgba(0, 166, 61, 0.3);
       }
 
+      /* color-scheme drives native controls/scrollbars. Set via CSS (not a
+         forced `dark only` meta) so the transparent embed below can override it
+         to `normal` — a forced scheme makes the browser paint an opaque canvas
+         and breaks hideBackground=true transparency in an iframe. */
+      html {
+        color-scheme: dark;
+      }
+      html.light {
+        color-scheme: light;
+      }
+
       body {
         background: var(--bg-primary);
         color: var(--text-secondary);
@@ -109,6 +119,63 @@
       .card-flat {
         background: var(--bg-tertiary);
         border: 1px solid var(--border);
+      }
+      .group-header:hover {
+        border-color: var(--border-hover);
+      }
+
+      .proto-badge {
+        flex-shrink: 0;
+        font-size: 10px;
+        line-height: 1.5;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+        padding: 0 6px;
+        border-radius: 5px;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        white-space: nowrap;
+      }
+      .proto-vless {
+        color: #4f8cff;
+        border-color: rgba(79, 140, 255, 0.35);
+        background: rgba(79, 140, 255, 0.1);
+      }
+      .proto-vmess {
+        color: #9b7dff;
+        border-color: rgba(155, 125, 255, 0.35);
+        background: rgba(155, 125, 255, 0.1);
+      }
+      .proto-trojan {
+        color: #ff6ec7;
+        border-color: rgba(255, 110, 199, 0.35);
+        background: rgba(255, 110, 199, 0.1);
+      }
+      .proto-shadowsocks {
+        color: #2bd576;
+        border-color: rgba(43, 213, 118, 0.35);
+        background: rgba(43, 213, 118, 0.1);
+      }
+      .proto-hysteria {
+        color: #ffae00;
+        border-color: rgba(255, 174, 0, 0.35);
+        background: rgba(255, 174, 0, 0.1);
+      }
+      .proto-wireguard {
+        color: #ff7a4d;
+        border-color: rgba(255, 122, 77, 0.35);
+        background: rgba(255, 122, 77, 0.12);
+      }
+      .proto-socks {
+        color: #2dd4bf;
+        border-color: rgba(45, 212, 191, 0.35);
+        background: rgba(45, 212, 191, 0.1);
+      }
+      .proto-http {
+        color: #94a3b8;
+        border-color: rgba(148, 163, 184, 0.35);
+        background: rgba(148, 163, 184, 0.12);
       }
 
       .text-primary {
@@ -323,9 +390,17 @@
         background: var(--color-red);
       }
 
-      /* Transparent background */
+      /* Transparent background (for embedding in an iframe).
+         Applied to both <html> and <body>, and paired with `color-scheme:
+         normal` on the root below: a transparent body alone is not enough,
+         because a non-normal color-scheme makes the browser paint an opaque
+         canvas behind it. Neutralizing the scheme on the root lets the
+         transparent document compose over the parent page. */
       .no-bg {
         background: transparent !important;
+      }
+      html.no-bg {
+        color-scheme: normal;
       }
 
       /* Badge mode */
@@ -856,84 +931,121 @@
         x-show="showProxies"
         class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2 mb-4"
       >
-        <template x-for="(proxy, idx) in filteredProxies" :key="proxy.stableId">
-          <div
-            class="proxy-card group card rounded-lg px-3 py-2.5 flex items-center gap-3 transition-all duration-150"
-            :class="initialLoad && 'animate'"
-          >
-            <!-- Status dot -->
-            <div class="relative flex-shrink-0">
-              <div
-                class="w-2 h-2 rounded-full"
-                :class="proxy.status ? 'status-online pulse' : 'status-offline'"
-              ></div>
-            </div>
-
-            <!-- Info -->
-            <div class="flex-1 min-w-0">
-              {{ if .IsPublic }}
-              <span
-                class="text-sm text-primary truncate block"
-                x-text="proxy.name"
-              ></span>
-              {{ else }}
-              <a
-                :href="proxy.url"
-                target="_blank"
-                class="text-sm text-primary link-hover truncate block transition-colors"
-                x-text="proxy.name"
-              ></a>
-              {{ end }} {{ if .ShowServerDetails }}
-              <span class="text-xs text-muted truncate block"
-                ><span x-text="proxy.serverInfo"></span> · :<span
-                  x-text="proxy.proxyPort"
-                ></span
-              ></span>
-              {{ end }}
-            </div>
-
-            <!-- Latency -->
-            <div class="flex flex-col items-center gap-1 flex-shrink-0">
-              <span
-                class="text-xs tabular-nums"
-                :class="proxy.latencyMs === 0 ? 'text-muted' : proxy.latencyMs < 500 ? 'latency-good' : proxy.latencyMs < 1000 ? 'latency-medium' : 'latency-bad'"
-                x-text="proxy.latency"
-              ></span>
-              <div class="flex items-center gap-0.5">
-                <template x-for="i in 5" :key="i">
-                  <div
-                    class="latency-segment"
-                    :class="proxy.latencyMs === 0 ? '' :
-                    (proxy.latencyMs < 500 ? (i <= getSegments(proxy.latencyMs) ? 'segment-good' : '') :
-                     proxy.latencyMs < 1000 ? (i <= getSegments(proxy.latencyMs) ? 'segment-medium' : '') :
-                     (i <= getSegments(proxy.latencyMs) ? 'segment-bad' : ''))"
-                  ></div>
-                </template>
-              </div>
-            </div>
-
-            {{ if not .IsPublic }}
-            <!-- Copy -->
-            <button
-              @click="copyUrl(proxy)"
-              class="hidden sm:block p-1.5 rounded text-muted btn-icon transition-all"
-              title="Copy URL"
-            >
-              <svg
-                class="w-3.5 h-3.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
+        <template x-for="item in displayItems" :key="item.key">
+          <div :style="item.type === 'header' ? 'grid-column: 1 / -1' : ''">
+            <!-- Group header (balancer groups) -->
+            <template x-if="item.type === 'header'">
+              <button
+                @click="toggleGroup(item.block.group)"
+                class="group-header card-flat w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-left transition-colors"
               >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                />
-              </svg>
-            </button>
-            {{ end }}
+                <svg
+                  class="w-3.5 h-3.5 text-muted transition-transform flex-shrink-0"
+                  :class="collapsedGroups[item.block.group] && '-rotate-90'"
+                  fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                >
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+                <span class="text-sm font-medium text-primary truncate flex-1" x-text="item.block.group"></span>
+                <span class="text-xs text-muted tabular-nums flex-shrink-0"
+                  ><span
+                    :class="item.block.online === item.block.total ? 'latency-good' : (item.block.online === 0 ? 'latency-bad' : '')"
+                    x-text="item.block.online"
+                  ></span>/<span x-text="item.block.total"></span
+                ></span>
+              </button>
+            </template>
+
+            <!-- Proxy card -->
+            <template x-if="item.type === 'proxy'">
+              <div
+                class="proxy-card group card rounded-lg px-3 py-2.5 flex items-center gap-3 transition-all duration-150"
+                :class="initialLoad && 'animate'"
+              >
+                <!-- Status dot -->
+                <div class="relative flex-shrink-0">
+                  <div
+                    class="w-2 h-2 rounded-full"
+                    :class="item.proxy.status ? 'status-online pulse' : 'status-offline'"
+                  ></div>
+                </div>
+
+                <!-- Info -->
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-1.5 min-w-0">
+                    {{ if .IsPublic }}
+                    <span
+                      class="text-sm text-primary truncate"
+                      x-text="item.proxy.name"
+                    ></span>
+                    {{ else }}
+                    <a
+                      :href="item.proxy.url"
+                      target="_blank"
+                      class="text-sm text-primary link-hover truncate transition-colors"
+                      x-text="item.proxy.name"
+                    ></a>
+                    {{ end }}
+                    <span
+                      x-show="item.proxy.protocol"
+                      class="proto-badge"
+                      :class="'proto-' + item.proxy.protocol"
+                      x-text="protoLabel(item.proxy.protocol)"
+                    ></span>
+                  </div>
+                  {{ if .ShowServerDetails }}
+                  <span class="text-xs text-muted truncate block"
+                    ><span x-text="item.proxy.serverInfo"></span> · :<span
+                      x-text="item.proxy.proxyPort"
+                    ></span
+                  ></span>
+                  {{ end }}
+                </div>
+
+                <!-- Latency -->
+                <div class="flex flex-col items-center gap-1 flex-shrink-0">
+                  <span
+                    class="text-xs tabular-nums"
+                    :class="item.proxy.latencyMs === 0 ? 'text-muted' : item.proxy.latencyMs < 500 ? 'latency-good' : item.proxy.latencyMs < 1000 ? 'latency-medium' : 'latency-bad'"
+                    x-text="item.proxy.latency"
+                  ></span>
+                  <div class="flex items-center gap-0.5">
+                    <template x-for="i in 5" :key="i">
+                      <div
+                        class="latency-segment"
+                        :class="item.proxy.latencyMs === 0 ? '' :
+                        (item.proxy.latencyMs < 500 ? (i <= getSegments(item.proxy.latencyMs) ? 'segment-good' : '') :
+                         item.proxy.latencyMs < 1000 ? (i <= getSegments(item.proxy.latencyMs) ? 'segment-medium' : '') :
+                         (i <= getSegments(item.proxy.latencyMs) ? 'segment-bad' : ''))"
+                      ></div>
+                    </template>
+                  </div>
+                </div>
+
+                {{ if not .IsPublic }}
+                <!-- Copy -->
+                <button
+                  @click="copyUrl(item.proxy)"
+                  class="hidden sm:block p-1.5 rounded text-muted btn-icon transition-all"
+                  title="Copy URL"
+                >
+                  <svg
+                    class="w-3.5 h-3.5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                    />
+                  </svg>
+                </button>
+                {{ end }}
+              </div>
+            </template>
           </div>
         </template>
       </div>
@@ -1065,11 +1177,21 @@
             return classes.join(' ');
           },
 
+          collapsedGroups: {},
+
           proxies: [
             {{ range $.Endpoints }}
-            { name: "{{.Name}}", stableId: "{{.StableID}}", {{ if $.ShowServerDetails }}serverInfo: "{{.ServerInfo}}", proxyPort: {{.ProxyPort}}, {{ end }}{{ if not $.IsPublic }}url: "{{.URL}}", {{ end }}index: {{.Index}}, status: {{.Status}}, latency: "{{ formatLatency .Latency }}", latencyMs: {{ .Latency.Milliseconds }} },
+            { name: "{{.Name}}", protocol: "{{.Protocol}}", stableId: "{{.StableID}}", groupName: "{{.GroupName}}", {{ if $.ShowServerDetails }}serverInfo: "{{.ServerInfo}}", proxyPort: {{.ProxyPort}}, {{ end }}{{ if not $.IsPublic }}url: "{{.URL}}", {{ end }}index: {{.Index}}, status: {{.Status}}, latency: "{{ formatLatency .Latency }}", latencyMs: {{ .Latency.Milliseconds }} },
             {{ end }}
           ],
+
+          protoLabel(p) {
+            return {
+              vless: "VLESS", vmess: "VMess", trojan: "Trojan",
+              shadowsocks: "Shadowsocks", hysteria: "Hysteria2",
+              socks: "SOCKS", http: "HTTP", wireguard: "WireGuard",
+            }[p] || (p ? p.toUpperCase() : "");
+          },
 
           get stats() {
             const online = this.proxies.filter(p => p.status).length;
@@ -1108,6 +1230,60 @@
               if (this.sort === 'name') return this.stripLeadingEmoji(a.name).localeCompare(this.stripLeadingEmoji(b.name));
               return a.index - b.index;
             });
+          },
+
+          // Partition filteredProxies into render blocks: one block per balancer
+          // group (proxies that share a non-empty groupName) plus a final block for
+          // ungrouped proxies. Subscriptions without groups yield a single block,
+          // so the layout is unchanged for them.
+          get proxyBlocks() {
+            const groups = new Map();
+            const ungrouped = [];
+            for (const p of this.filteredProxies) {
+              if (p.groupName) {
+                if (!groups.has(p.groupName)) groups.set(p.groupName, []);
+                groups.get(p.groupName).push(p);
+              } else {
+                ungrouped.push(p);
+              }
+            }
+            const blocks = [];
+            // Ungrouped (standalone) nodes first so each balancer group below is
+            // clearly delimited by its own header (no blending into a headerless block).
+            if (ungrouped.length) {
+              blocks.push({ key: '_ungrouped', group: '', proxies: ungrouped, online: 0, total: ungrouped.length });
+            }
+            for (const [name, proxies] of groups) {
+              blocks.push({
+                key: 'g:' + name,
+                group: name,
+                proxies,
+                online: proxies.filter(p => p.status).length,
+                total: proxies.length,
+              });
+            }
+            return blocks;
+          },
+
+          // Flatten blocks into a single list of grid items (group header rows +
+          // proxy cards) so the whole grid shares one uniform gap. Collapsed groups
+          // contribute only their header.
+          get displayItems() {
+            const items = [];
+            for (const b of this.proxyBlocks) {
+              if (b.group) {
+                items.push({ type: 'header', key: 'h:' + b.group, block: b });
+                if (this.collapsedGroups[b.group]) continue;
+              }
+              for (const p of b.proxies) {
+                items.push({ type: 'proxy', key: p.stableId, proxy: p });
+              }
+            }
+            return items;
+          },
+
+          toggleGroup(name) {
+            this.collapsedGroups[name] = !this.collapsedGroups[name];
           },
 
           init() {
