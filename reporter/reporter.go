@@ -82,7 +82,7 @@ func buildPayload(proxyChecker *checker.ProxyChecker, version string) (reportPay
 	var latencyCount int
 
 	for _, proxy := range proxies {
-		status, latency, _ := proxyChecker.GetProxyStatus(proxy.Name)
+		status, latency, _, _ := proxyChecker.GetProxyResultByStableID(proxy.StableID)
 		if status {
 			online++
 			if latency > 0 {
