@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"xray-checker/checker"
 	"xray-checker/config"
@@ -100,7 +101,28 @@ func main() {
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(metrics.NewCollector(config.CLIConfig.Metrics.Instance, proxyChecker))
 
+	// One check cycle must not overlap the next. A second start within this
+	// window is the same cycle and must not send another report.
+	const checkStartGap = 5 * time.Second
+	var checkStartMu sync.Mutex
+	var lastCheckStart time.Time
+
 	runCheckIteration := func() {
+		checkStartMu.Lock()
+		if !lastCheckStart.IsZero() && time.Since(lastCheckStart) < checkStartGap {
+			ago := time.Since(lastCheckStart)
+			checkStartMu.Unlock()
+			logger.Info("Skipping check cycle: previous cycle started %s ago", ago.Round(time.Millisecond))
+			return
+		}
+		lastCheckStart = time.Now()
+		checkStartMu.Unlock()
+
+		// Subscription and the probe check are one cycle: refresh the node list
+		// first, then measure and send a single report. A separate update timer
+		// used to race this check and post a second report a second later.
+		refreshSubscription(proxyConfigs, xrayRunner, proxyChecker)
+
 		logger.Info("Starting proxy check iteration")
 		start := time.Now()
 		proxyChecker.CheckAllProxies()
@@ -158,42 +180,6 @@ func main() {
 	})
 	checkScheduler.StartAsync()
 
-	if config.CLIConfig.Subscription.Update {
-		updateScheduler := gocron.NewScheduler(time.UTC)
-		updateScheduler.Every(config.CLIConfig.Subscription.UpdateInterval).Seconds().WaitForSchedule().Do(func() {
-			logger.Info("Checking subscriptions for updates...")
-			newConfigs, err := subscription.ReadFromMultipleSources(config.CLIConfig.Subscription.URLs)
-			if err != nil {
-				logger.Error("Error fetching subscriptions: %v", err)
-				return
-			}
-
-			if config.CLIConfig.Proxy.ResolveDomains {
-				resolved, err := subscription.ResolveDomainsForConfigs(newConfigs)
-				if err != nil {
-					logger.Error("Error resolving domains: %v", err)
-				} else {
-					newConfigs = resolved
-				}
-			}
-
-			if !xray.IsConfigsEqual(*proxyConfigs, newConfigs) {
-				if err := updateConfiguration(newConfigs, proxyConfigs, xrayRunner, proxyChecker); err != nil {
-					logger.Error("Error updating configuration: %v", err)
-				} else {
-					// Immediately re-check the new proxy set so /metrics is repopulated
-					// right away instead of staying empty until the next scheduled check
-					// (up to PROXY_CHECK_INTERVAL), then drop series for removed proxies.
-					runCheckIteration()
-					proxyChecker.PruneStaleResults()
-				}
-			} else {
-				logger.Info("Subscriptions checked, no changes")
-			}
-		})
-		updateScheduler.StartAsync()
-	}
-
 	mux, err := web.NewPrefixServeMux(config.CLIConfig.Metrics.BasePath)
 	if err != nil {
 		logger.Fatal("Error creating web server: %v", err)
@@ -247,6 +233,42 @@ func main() {
 			logger.Fatal("Error starting server: %v", err)
 		}
 	}
+}
+
+// refreshSubscription loads the subscription and, when the node list changed,
+// swaps it in before the check. A fetch error keeps the previous list so the
+// cycle still produces a report.
+func refreshSubscription(currentConfigs *[]*models.ProxyConfig, xrayRunner *xray.Runner, proxyChecker *checker.ProxyChecker) {
+	if !config.CLIConfig.Subscription.Update {
+		return
+	}
+
+	logger.Info("Refreshing subscription before check")
+	newConfigs, err := subscription.ReadFromMultipleSources(config.CLIConfig.Subscription.URLs)
+	if err != nil {
+		logger.Error("Error fetching subscriptions: %v", err)
+		return
+	}
+
+	if config.CLIConfig.Proxy.ResolveDomains {
+		resolved, err := subscription.ResolveDomainsForConfigs(newConfigs)
+		if err != nil {
+			logger.Error("Error resolving domains: %v", err)
+		} else {
+			newConfigs = resolved
+		}
+	}
+
+	if xray.IsConfigsEqual(*currentConfigs, newConfigs) {
+		logger.Info("Subscriptions checked, no changes")
+		return
+	}
+
+	if err := updateConfiguration(newConfigs, currentConfigs, xrayRunner, proxyChecker); err != nil {
+		logger.Error("Error updating configuration: %v", err)
+		return
+	}
+	proxyChecker.PruneStaleResults()
 }
 
 func updateConfiguration(newConfigs []*models.ProxyConfig, currentConfigs *[]*models.ProxyConfig,
