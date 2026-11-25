@@ -101,7 +101,7 @@ func (g *ConfigGenerator) GenerateValidatedConfig(proxies []*models.ProxyConfig,
 		idx := -1
 		if tag != "" {
 			for i, p := range current {
-				if outboundTag(p) == tag {
+				if outboundTag(p) == tag || (len(p.FragmentDialerSettings) > 0 && fragmentDialerTag(p) == tag) {
 					idx = i
 					break
 				}
