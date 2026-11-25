@@ -1,0 +1,32 @@
+name: Test and build checker
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./...
+      - name: Build Linux amd64 probe
+        env:
+          CGO_ENABLED: "0"
+          COMMIT: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: go build -trimpath -ldflags="-s -w -X main.version=pr-${PR} -X main.commit=${COMMIT}" -o dist/xray-checker .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xray-checker-linux-amd64
+          path: dist/xray-checker
+          retention-days: 7

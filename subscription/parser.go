@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -755,6 +756,34 @@ func nameGroupedProxies(remarks string, group []*models.ProxyConfig) {
 	}
 }
 
+// A dialer tag is local to its subscription document. Resolve it before
+// flattening the subscription into the checker's combined Xray config.
+type jsonOutbound struct {
+	Protocol       string
+	Tag            string
+	Settings       json.RawMessage
+	StreamSettings struct{ Sockopt struct{ DialerProxy string } }
+}
+
+func fragmentDialerSettings(out jsonOutbound, byTag map[string]jsonOutbound) (json.RawMessage, error) {
+	tag := out.StreamSettings.Sockopt.DialerProxy
+	if tag == "" {
+		return nil, nil
+	}
+	helper, ok := byTag[tag]
+	if !ok || helper.Protocol != "freedom" || helper.StreamSettings.Sockopt.DialerProxy != "" {
+		return nil, fmt.Errorf("unsupported or missing fragment dialer %q", tag)
+	}
+	// Canonicalize nested settings so JSON object key order does not change the stable ID.
+	var settings map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(helper.Settings))
+	decoder.UseNumber()
+	if err := decoder.Decode(&settings); err != nil || (settings["fragment"] == nil && settings["noises"] == nil) {
+		return nil, fmt.Errorf("missing fragment or noises settings for dialer %q", tag)
+	}
+	return json.Marshal(settings)
+}
+
 func (p *Parser) parseJSONConfigs(data []byte) ([]*models.ProxyConfig, error) {
 	var configs []struct {
 		Remarks   string            `json:"remarks"`
@@ -772,11 +801,33 @@ func (p *Parser) parseJSONConfigs(data []byte) ([]*models.ProxyConfig, error) {
 
 	for _, config := range configs {
 		var group []*models.ProxyConfig
-		for _, outboundRaw := range config.Outbounds {
+		metadata := make([]jsonOutbound, len(config.Outbounds))
+		byTag := make(map[string]jsonOutbound)
+		for i, raw := range config.Outbounds {
+			if err := json.Unmarshal(raw, &metadata[i]); err != nil {
+				continue
+			}
+			if tag := metadata[i].Tag; tag != "" {
+				if _, duplicate := byTag[tag]; duplicate {
+					// Ambiguous local tags cannot identify a safe helper.
+					byTag[tag] = jsonOutbound{}
+				} else {
+					byTag[tag] = metadata[i]
+				}
+			}
+		}
+		for i, outboundRaw := range config.Outbounds {
 			proxyConfig, err := p.convertOutbound(outboundRaw, configIndex, nil)
 			if err != nil || proxyConfig == nil {
 				continue
 			}
+			settings, err := fragmentDialerSettings(metadata[i], byTag)
+			if err != nil {
+				logger.Warn("Skipping %s: %v", config.Remarks, err)
+				continue
+			}
+			proxyConfig.FragmentDialerSettings = settings
+			proxyConfig.StableID = proxyConfig.GenerateStableID()
 			group = append(group, proxyConfig)
 			configIndex++
 		}
@@ -792,36 +843,10 @@ func (p *Parser) parseJSONConfigs(data []byte) ([]*models.ProxyConfig, error) {
 }
 
 func (p *Parser) parseSingleJSONConfig(data []byte) ([]*models.ProxyConfig, error) {
-	var config struct {
-		Remarks   string            `json:"remarks"`
-		Outbounds []json.RawMessage `json:"outbounds"`
-	}
-
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse single JSON config: %v", err)
-	}
-
-	logger.Debug("Parsed single JSON config with %d outbounds", len(config.Outbounds))
-
-	var proxyConfigs []*models.ProxyConfig
-	configIndex := 0
-
-	for _, outboundRaw := range config.Outbounds {
-		proxyConfig, err := p.convertOutbound(outboundRaw, configIndex, nil)
-		if err != nil || proxyConfig == nil {
-			continue
-		}
-		proxyConfigs = append(proxyConfigs, proxyConfig)
-		configIndex++
-	}
-
-	nameGroupedProxies(config.Remarks, proxyConfigs)
-
-	if len(proxyConfigs) == 0 {
-		return nil, fmt.Errorf("no valid proxy configurations found in single JSON config")
-	}
-
-	return proxyConfigs, nil
+	array := make([]byte, 0, len(data)+2)
+	array = append(array, '[')
+	array = append(array, data...)
+	return p.parseJSONConfigs(append(array, ']'))
 }
 
 func (p *Parser) cleanEmptyLines(data []byte) []byte {
@@ -1488,7 +1513,7 @@ func (p *Parser) parseFolder(folderPath string) ([]*models.ProxyConfig, error) {
 			continue
 		}
 
-		configs, err := p.parseSingleConfigFile(data, configIndex)
+		configs, err := p.parseSingleConfigFile(data)
 		if err != nil {
 			logger.Warn("Failed to parse file %s: %v", fileName, err)
 			continue
@@ -1511,7 +1536,7 @@ func (p *Parser) parseFolder(folderPath string) ([]*models.ProxyConfig, error) {
 	return allConfigs, nil
 }
 
-func (p *Parser) parseSingleConfigFile(data []byte, startIndex int) ([]*models.ProxyConfig, error) {
+func (p *Parser) parseSingleConfigFile(data []byte) ([]*models.ProxyConfig, error) {
 	trimmedData := strings.TrimSpace(string(data))
 
 	if strings.HasPrefix(trimmedData, "[") {
@@ -1519,31 +1544,7 @@ func (p *Parser) parseSingleConfigFile(data []byte, startIndex int) ([]*models.P
 	}
 
 	if strings.HasPrefix(trimmedData, "{") {
-		var config struct {
-			Remarks   string            `json:"remarks"`
-			Outbounds []json.RawMessage `json:"outbounds"`
-		}
-
-		if err := json.Unmarshal(data, &config); err != nil {
-			return nil, fmt.Errorf("failed to parse JSON config: %v", err)
-		}
-
-		var proxyConfigs []*models.ProxyConfig
-		for _, outboundRaw := range config.Outbounds {
-			proxyConfig, err := p.convertOutbound(outboundRaw, startIndex, nil)
-			if err != nil || proxyConfig == nil {
-				continue
-			}
-			proxyConfigs = append(proxyConfigs, proxyConfig)
-		}
-
-		nameGroupedProxies(config.Remarks, proxyConfigs)
-
-		if len(proxyConfigs) == 0 {
-			return nil, fmt.Errorf("no valid proxy configurations found")
-		}
-
-		return proxyConfigs, nil
+		return p.parseSingleJSONConfig(data)
 	}
 
 	return nil, fmt.Errorf("unsupported config format")
