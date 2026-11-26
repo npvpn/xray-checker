@@ -3,6 +3,7 @@ package models
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -10,6 +11,9 @@ import (
 )
 
 type ProxyConfig struct {
+	// FragmentDialerSettings belongs to this transport and is never a separate probe.
+	FragmentDialerSettings json.RawMessage `json:"-"`
+
 	Protocol             string
 	Server               string
 	Port                 int
@@ -130,6 +134,9 @@ func (pc *ProxyConfig) GenerateStableID() string {
 		fmt.Fprintf(h, "%s=%d:%s;", key, len(val), val)
 	}
 
+	if len(pc.FragmentDialerSettings) > 0 {
+		write("fragmentDialer", string(pc.FragmentDialerSettings))
+	}
 	write("protocol", pc.Protocol)
 	write("server", pc.Server)
 	write("port", strconv.Itoa(pc.Port))

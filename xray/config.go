@@ -44,6 +44,10 @@ func validateConfigBuild(configBytes []byte) error {
 	return err
 }
 
+func fragmentDialerTag(proxy *models.ProxyConfig) string {
+	return fmt.Sprintf("probe-%d-fragment", proxy.Index)
+}
+
 func outboundTag(proxy *models.ProxyConfig) string {
 	return fmt.Sprintf("%s_%d", proxy.Name, proxy.Index)
 }
@@ -97,7 +101,7 @@ func (g *ConfigGenerator) GenerateValidatedConfig(proxies []*models.ProxyConfig,
 		idx := -1
 		if tag != "" {
 			for i, p := range current {
-				if outboundTag(p) == tag {
+				if outboundTag(p) == tag || (len(p.FragmentDialerSettings) > 0 && fragmentDialerTag(p) == tag) {
 					idx = i
 					break
 				}
@@ -165,6 +169,11 @@ func (g *ConfigGenerator) generateOutbounds(proxies []*models.ProxyConfig) []map
 	for _, proxy := range proxies {
 		outbound := g.generateProxyOutbound(proxy)
 		outbounds = append(outbounds, outbound)
+		if len(proxy.FragmentDialerSettings) > 0 {
+			outbounds = append(outbounds, map[string]interface{}{
+				"protocol": "freedom", "tag": fragmentDialerTag(proxy), "settings": proxy.FragmentDialerSettings,
+			})
+		}
 	}
 
 	return outbounds
@@ -300,7 +309,11 @@ func (g *ConfigGenerator) generateProxyOutbound(proxy *models.ProxyConfig) map[s
 
 	// WireGuard is its own transport and takes no streamSettings.
 	if proxy.Protocol != "wireguard" {
-		outbound["streamSettings"] = g.generateStreamSettings(proxy)
+		stream := g.generateStreamSettings(proxy)
+		if len(proxy.FragmentDialerSettings) > 0 {
+			stream["sockopt"] = map[string]interface{}{"dialerProxy": fragmentDialerTag(proxy)}
+		}
+		outbound["streamSettings"] = stream
 	}
 
 	return outbound

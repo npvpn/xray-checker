@@ -54,6 +54,22 @@ func TestGenerateValidatedConfigPrunesUnbuildable(t *testing.T) {
 	}
 }
 
+func TestGenerateValidatedConfigPrunesInvalidFragmentOwner(t *testing.T) {
+	good := &models.ProxyConfig{
+		Protocol: "vless", Server: "good.example.com", Port: 443, Name: "good",
+		UUID: "00000000-0000-0000-0000-000000000000", Type: "tcp", Security: "none",
+	}
+	bad := *good
+	bad.Index = 1
+	bad.FragmentDialerSettings = json.RawMessage(`{"fragment":{"packets":"invalid","length":"10","interval":"1"}}`)
+	survivors, err := NewConfigGenerator().GenerateValidatedConfig(
+		[]*models.ProxyConfig{good, &bad}, 20000, filepath.Join(t.TempDir(), "config.json"), "none",
+	)
+	if err != nil || len(survivors) != 1 || survivors[0] != good {
+		t.Fatalf("expected only the working proxy, got %d: %v", len(survivors), err)
+	}
+}
+
 // buildsWithXrayCore feeds a generated config through the exact decode+build path
 // that xray/runner.go uses at startup. This validates the JSON against xray-core's
 // real schema, catching key/placement mistakes that json.Unmarshal would otherwise
